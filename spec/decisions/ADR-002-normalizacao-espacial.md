@@ -2,7 +2,7 @@
 
 **Data:** 2026-07-07
 **Status:** Aceita
-**Contexto:** Participante 2 (Engenharia de Dados)
+**Contexto:** Luiz
 
 ---
 
