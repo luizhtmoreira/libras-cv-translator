@@ -17,6 +17,7 @@ Para garantir a entrega no prazo, o dicionário da POC será restrito e focado e
 * **Sinais Estáticos (1 Frame):** Alfabeto básico (A, B, C, etc.) de frente para a câmera.
 * **Sinais Dinâmicos (Janela de Tempo):** Palavras com movimento (ex: "Obrigado", "Desculpa", "Por favor").
 * **Fora do Escopo:** Sinais direcionais que dependem do ângulo Z da palma (ex: "Nome"), para evitar explosão da dimensionalidade do dataset.
+* **Fora do Escopo:** Sinais que envolvem duas mãos simultaneamente. O pipeline captura `num_hands=1`; suporte a 2 mãos exigiria dobrar o feature vector (132d), definir uma estratégia de padding para mão ausente e resolver a ambiguidade de atribuição esquerda/direita — complexidade incompatível com o prazo.
 
 ## 4. Arquitetura da Solução
 1.  **Entrada:** Captura de vídeo via webcam (OpenCV).
