@@ -38,12 +38,12 @@ Abaixo estão as frentes de trabalho. Os membros devem assumir as responsabilida
 * [ ] Desenvolver e treinar o Modelo Temporal (Transformer) para analisar janelas de 30 frames.
 * [ ] Documentar em *logs* cada hiperparâmetro testado, funções de perda e motivos de (não) convergência para o relatório final.
 
-### Participante 2 (Foco: Engenharia de Dados e Pipeline Visual)
+### Participante 2 — Luiz (Foco: Engenharia de Dados e Pipeline Visual)
 *Carga pesada inicial. Libera o fluxo para o resto do time.*
-* [ ] Criar o script `capture.py` utilizando OpenCV para abrir a webcam.
-* [ ] Integrar o MediaPipe no script para extrair os 21 pontos da mão em tempo real.
-* [ ] Desenvolver a lógica matemática de normalização espacial (ex: centralizar as coordenadas usando o pulso como origem).
-* [ ] Implementar a lógica de gravação em janelas fixas (30 *frames*) e exportação em `.npy`.
+* [x] Criar o script `capture.py` utilizando OpenCV para abrir a webcam.
+* [x] Integrar o MediaPipe no script para extrair os 21 pontos da mão em tempo real.
+* [x] Desenvolver a lógica matemática de normalização espacial (ex: centralizar as coordenadas usando o pulso como origem).
+* [x] Implementar a lógica de gravação em janelas fixas (30 *frames*) e exportação em `.npy`.
 * [ ] Liderar a gravação do *dataset* com o grupo (Coletar N amostras por sinal).
 
 ### Participante 3 (Foco: Documentação Científica e Audiovisual)
