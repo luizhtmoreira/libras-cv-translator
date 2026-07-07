@@ -8,6 +8,9 @@ data/*
 *.npy
 *.csv
 
+# Modelos pré-treinados (arquivos pesados)
+models/
+
 # Arquivos de Sistema
 .DS_Store
 __pycache__/
