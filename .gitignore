@@ -1,0 +1,14 @@
+# Ambientes Virtuais
+.venv/
+env/
+
+# Dados e Tensores (Ignorar arquivos pesados)
+data/*
+!data/.gitkeep
+*.npy
+*.csv
+
+# Arquivos de Sistema
+.DS_Store
+__pycache__/
+.ipynb_checkpoints/
