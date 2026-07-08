@@ -78,11 +78,17 @@ output_dir = os.path.join(DATA_DIR, SINAL)
 os.makedirs(output_dir, exist_ok=True)
 
 # Descobre qual é o próximo índice de amostra (continua de onde parou)
-# Ex: se já existem 0.npy e 1.npy, começa do 2.npy
+# Usa o maior índice existente + 1 para evitar sobrescrever arquivos
+# quando alguns foram deletados no meio (ex: deletou 0.npy e 1.npy,
+# mas ainda existem 2.npy...49.npy → próximo deve ser 50, não 47)
 existing = [f for f in os.listdir(output_dir) if f.endswith(".npy")]
-next_idx = len(existing)
+existing_count = len(existing)           # quantas amostras já existem de fato
+if existing:
+    next_idx = max(int(f[:-4]) for f in existing) + 1
+else:
+    next_idx = 0
 
-print(f"Sinal: '{SINAL}' | Amostras já coletadas: {next_idx} | Meta: {MAX_AMOSTRAS}")
+print(f"Sinal: '{SINAL}' | Amostras já coletadas: {existing_count} | Meta: {MAX_AMOSTRAS}")
 print("Pressione ESPAÇO para gravar uma amostra. 'q' para sair.")
 
 
@@ -219,11 +225,12 @@ def draw_hud(frame, gravando: bool, frames_gravados: int, amostras_salvas: int, 
 # ─────────────────────────────────────────────────────────────
 # ESTADO DA GRAVAÇÃO
 # ─────────────────────────────────────────────────────────────
-gravando        = False       # True enquanto estamos acumulando frames
-buffer          = []          # lista de arrays (66,) — acumula os 30 frames
-prev_wrist      = None        # posição do pulso no frame anterior
-amostras_salvas = next_idx    # conta amostras salvas nesta sessão
-ultima_amostra  = None        # caminho do último .npy salvo (para undo)
+gravando        = False          # True enquanto estamos acumulando frames
+buffer          = []             # lista de arrays (66,) — acumula os 30 frames
+prev_wrist      = None           # posição do pulso no frame anterior
+amostras_salvas = existing_count # conta real de arquivos no disco
+next_file_idx   = next_idx       # índice usado para nomear o próximo arquivo
+ultima_amostra  = None           # caminho do último .npy salvo (para undo)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -276,9 +283,10 @@ while True:
                 tensor = np.stack(buffer)  # shape (30, 66)
 
                 # Salva em data/raw/{sinal}/{idx}.npy
-                filepath = os.path.join(output_dir, f"{amostras_salvas}.npy")
+                filepath = os.path.join(output_dir, f"{next_file_idx}.npy")
                 np.save(filepath, tensor)
 
+                next_file_idx   += 1
                 amostras_salvas += 1
                 ultima_amostra   = filepath  # guarda para possível undo
                 print(f"  Salvo: {filepath} | shape={tensor.shape} | dtype={tensor.dtype}")
@@ -352,4 +360,4 @@ while True:
 cap.release()
 cv2.destroyAllWindows()
 landmarker.close()
-print(f"\nSessão encerrada. Amostras salvas: {amostras_salvas - next_idx} (total no disco: {amostras_salvas})")
+print(f"\nSessão encerrada. Amostras salvas nesta sessão: {amostras_salvas - existing_count} (total no disco: {amostras_salvas})")
