@@ -1,7 +1,7 @@
 """
-capture_dynamic.py — Pipeline de Captura para Sinais Dinâmicos (Palavras/Expressões)
-======================================================================================
-Diferenças em relação ao capture.py (letras):
+capture_dynamic.py — Pipeline de Captura para Letras Dinâmicas (h/j/k/x/y/z)
+=============================================================================
+Diferenças em relação ao capture.py (letras estáticas):
 
 1. RunningMode.VIDEO  → MediaPipe mantém um tracker entre frames.
    Em movimentos rápidos (ex: "Obrigado") a mão não é perdida, pois o
@@ -11,8 +11,8 @@ Diferenças em relação ao capture.py (letras):
    gravação, o script congela o último frame válido em vez de cancelar.
    Evita descartar amostras por oclusão momentânea no meio do sinal.
 
-3. Saída em data/raw/words/{sinal}/ — separado das letras para não
-   misturar os datasets (letras e palavras terão classes distintas no modelo).
+3. Saída em data/raw/dynamic/{sinal}/ — separado das letras estáticas para
+   não misturar os datasets (modelos distintos na arquitetura dual, ADR-010).
 
 Feature vector por frame (66 valores) — idêntico ao capture.py:
   [0:63]  → 21 landmarks normalizados (translação + escala)
@@ -21,7 +21,7 @@ Feature vector por frame (66 valores) — idêntico ao capture.py:
 Tensor salvo: shape (30, 66), dtype float32
 
 Como rodar:
-    .venv/bin/python src/capture_dynamic.py --sinal obrigado --amostras 50
+    .venv/bin/python src/capture_dynamic.py --sinal j --amostras 50
 
 Teclas durante a captura:
     ESPAÇO → inicia gravação de 1 amostra (30 frames)
@@ -31,7 +31,11 @@ Teclas durante a captura:
 
 import argparse
 import os
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -39,36 +43,22 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from mediapipe.tasks.python.vision import RunningMode
 
-# ─────────────────────────────────────────────────────────────
-# CONSTANTES
-# ─────────────────────────────────────────────────────────────
-MODEL_PATH  = "models/hand_landmarker.task"
-DATA_DIR    = "data/raw/words"   # separado das letras
-FRAMES      = 30                 # janela temporal (igual às letras → mesmo modelo)
-COORDS      = 21 * 3             # 21 landmarks × 3 coords = 63
-DELTA       = 3                  # Δx, Δy, Δz do pulso
-FEATURE_DIM = COORDS + DELTA     # 66 valores por frame
-GRACE_PERIOD = 3                 # frames de tolerância para perda momentânea da mão
+from src.constants import (
+    COR_AMARELO,
+    COR_BRANCO,
+    COR_CINZA,
+    COR_ROXO,
+    COR_VERDE,
+    COR_VERMELHO,
+    DATA_DIR_DYNAMIC as DATA_DIR,
+    FINGERTIP_INDICES,
+    FRAMES,
+    HAND_CONNECTIONS,
+    MODEL_PATH,
+)
+from src.features import build_feature_vector, extract_landmarks, normalize_landmarks
 
-WRIST_IDX = 0
-SCALE_IDX = 9
-
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),
-    (0, 5), (5, 6), (6, 7), (7, 8),
-    (0, 9), (9, 10), (10, 11), (11, 12),
-    (0, 13), (13, 14), (14, 15), (15, 16),
-    (0, 17), (17, 18), (18, 19), (19, 20),
-    (5, 9), (9, 13), (13, 17),
-]
-
-# Cores (BGR)
-COR_VERDE    = (0, 255, 0)
-COR_VERMELHO = (0, 0, 255)
-COR_AMARELO  = (0, 255, 255)
-COR_BRANCO   = (255, 255, 255)
-COR_CINZA    = (180, 180, 180)
-COR_ROXO     = (255, 100, 100)   # indica grace period ativo
+GRACE_PERIOD = 3   # frames de tolerância para perda momentânea da mão
 
 
 # ─────────────────────────────────────────────────────────────
@@ -114,41 +104,6 @@ landmarker = mp_vision.HandLandmarker.create_from_options(options)
 
 
 # ─────────────────────────────────────────────────────────────
-# FUNÇÕES DE PROCESSAMENTO (idênticas ao capture.py)
-# ─────────────────────────────────────────────────────────────
-def extract_landmarks(landmarks) -> np.ndarray:
-    """Converte 21 landmarks em array (63,) com [x0,y0,z0, x1,y1,z1, ...]."""
-    coords = []
-    for lm in landmarks:
-        coords.extend([lm.x, lm.y, lm.z])
-    return np.array(coords, dtype=np.float32)
-
-
-def normalize_landmarks(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Normaliza os landmarks e retorna também as coordenadas brutas do pulso.
-
-    Retorna:
-        normalized: array (63,) com coords normalizadas (translação + escala)
-        wrist_raw:  array (3,) com [x, y, z] do pulso ANTES da normalização
-    """
-    points = raw.reshape(21, 3)
-    wrist_raw = points[WRIST_IDX].copy()
-    points = points - wrist_raw
-    scale = np.linalg.norm(points[SCALE_IDX])
-    if scale > 1e-6:
-        points = points / scale
-    return points.flatten(), wrist_raw
-
-
-def build_feature_vector(normalized: np.ndarray, wrist_raw: np.ndarray,
-                         prev_wrist: np.ndarray) -> np.ndarray:
-    """Monta o vetor de features final de 66 valores para um frame."""
-    delta = wrist_raw - prev_wrist
-    return np.concatenate([normalized, delta])
-
-
-# ─────────────────────────────────────────────────────────────
 # FUNÇÕES DE DESENHO
 # ─────────────────────────────────────────────────────────────
 def draw_landmarks(frame, landmarks, grace_ativo: bool = False):
@@ -158,7 +113,7 @@ def draw_landmarks(frame, landmarks, grace_ativo: bool = False):
     for start, end in HAND_CONNECTIONS:
         cv2.line(frame, points[start], points[end], cor_conexao, 2)
     for i, (px, py) in enumerate(points):
-        color = COR_VERMELHO if i in [4, 8, 12, 16, 20] else COR_VERDE
+        color = COR_VERMELHO if i in FINGERTIP_INDICES else COR_VERDE
         cv2.circle(frame, (px, py), 5, color, -1)
 
 

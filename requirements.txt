@@ -1,3 +1,15 @@
 opencv-python
 mediapipe
 numpy
+
+# Treino e avaliação
+torch
+scikit-learn
+matplotlib
+tqdm
+
+# Datasets externos
+kagglehub
+
+# Notebook
+jupyter
