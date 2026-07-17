@@ -10,17 +10,37 @@ Feature vector por frame (66 valores):
 
 Tensor salvo: shape (30, 66), dtype float32
 
+Dois modos de captura (--modo):
+
+  burst (default) — otimizado para letras ESTÁTICAS: ESPAÇO dispara uma rajada
+      de N fotos (default 5) com intervalo de 1s entre elas. Cada foto vira uma
+      amostra (30, 66) com o frame replicado 30x e delta zero — exatamente o
+      formato que o preprocess do Brazilian Alphabet gera (imagem estática).
+      Fluxo recomendado: uma rajada por pose; entre rajadas, varie ângulo,
+      distância e iluminação.
+
+  janela — modo legado: ESPAÇO grava 30 frames contínuos (~1s) em uma amostra.
+
 Como rodar:
-    .venv/bin/python src/capture.py --sinal A --amostras 30
+    python -m src.capture --sinal A --amostras 40
+    python -m src.capture --sinal A --amostras 40 --fotos 5 --intervalo 1.0
+    python -m src.capture --sinal A --modo janela
 
 Teclas durante a captura:
-    ESPAÇO → inicia gravação de 1 amostra (30 frames)
-    u      → desfaz a última amostra salva (apaga o arquivo)
+    ESPAÇO → dispara a rajada (burst) ou grava 30 frames (janela)
+    u      → desfaz a última rajada/amostra salva (apaga os arquivos)
     q      → encerra o programa
 """
 
 import argparse
 import os
+import sys
+import time
+
+# Permite rodar como `python src/capture.py` (o diretório do script vai para o sys.path,
+# mas precisamos do repo root para importar `src.features` etc.)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -28,34 +48,19 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from mediapipe.tasks.python.vision import RunningMode
 
-# ─────────────────────────────────────────────────────────────
-# CONSTANTES
-# ─────────────────────────────────────────────────────────────
-MODEL_PATH  = "models/hand_landmarker.task"
-DATA_DIR    = "data/raw"
-FRAMES      = 30          # tamanho da janela temporal
-COORDS      = 21 * 3      # 21 landmarks × 3 coords (x, y, z) = 63
-DELTA       = 3           # Δx, Δy, Δz do pulso = 3
-FEATURE_DIM = COORDS + DELTA  # 66 valores por frame
-
-WRIST_IDX = 0
-SCALE_IDX = 9
-
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),
-    (0, 5), (5, 6), (6, 7), (7, 8),
-    (0, 9), (9, 10), (10, 11), (11, 12),
-    (0, 13), (13, 14), (14, 15), (15, 16),
-    (0, 17), (17, 18), (18, 19), (19, 20),
-    (5, 9), (9, 13), (13, 17),
-]
-
-# Cores (BGR)
-COR_VERDE   = (0, 255, 0)
-COR_VERMELHO = (0, 0, 255)
-COR_AMARELO = (0, 255, 255)
-COR_BRANCO  = (255, 255, 255)
-COR_CINZA   = (180, 180, 180)
+from src.constants import (
+    COR_AMARELO,
+    COR_BRANCO,
+    COR_CINZA,
+    COR_VERDE,
+    COR_VERMELHO,
+    DATA_DIR_LETTERS as DATA_DIR,
+    FINGERTIP_INDICES,
+    FRAMES,
+    HAND_CONNECTIONS,
+    MODEL_PATH,
+)
+from src.features import build_feature_vector, extract_landmarks, normalize_landmarks
 
 
 # ─────────────────────────────────────────────────────────────
@@ -67,10 +72,20 @@ COR_CINZA   = (180, 180, 180)
 parser = argparse.ArgumentParser(description="Captura de landmarks para Libras")
 parser.add_argument("--sinal",    required=True, help="Nome do sinal (ex: A, B, obrigado)")
 parser.add_argument("--amostras", type=int, default=30, help="Número de amostras a coletar")
+parser.add_argument("--modo", choices=["burst", "janela"], default="burst",
+                    help="burst: ESPAÇO tira N fotos espaçadas (letras estáticas). "
+                         "janela: ESPAÇO grava 30 frames contínuos (modo legado)")
+parser.add_argument("--fotos", type=int, default=5,
+                    help="Fotos por rajada no modo burst")
+parser.add_argument("--intervalo", type=float, default=1.0,
+                    help="Segundos entre fotos da rajada")
 args = parser.parse_args()
 
 SINAL        = args.sinal.lower()
 MAX_AMOSTRAS = args.amostras
+MODO         = args.modo
+BURST_FOTOS  = args.fotos
+BURST_INTERVALO = args.intervalo
 
 # Cria o diretório de saída se não existir
 # exist_ok=True → não dá erro se a pasta já existir
@@ -89,80 +104,29 @@ else:
     next_idx = 0
 
 print(f"Sinal: '{SINAL}' | Amostras já coletadas: {existing_count} | Meta: {MAX_AMOSTRAS}")
-print("Pressione ESPAÇO para gravar uma amostra. 'q' para sair.")
+if MODO == "burst":
+    print(f"Modo BURST: ESPAÇO tira {BURST_FOTOS} fotos com {BURST_INTERVALO:.0f}s de "
+          f"intervalo. Varie ângulo/iluminação entre rajadas. 'q' para sair.")
+else:
+    print("Pressione ESPAÇO para gravar uma amostra (30 frames). 'q' para sair.")
 
 
 # ─────────────────────────────────────────────────────────────
 # CONFIGURAÇÃO DO MEDIAPIPE
 # ─────────────────────────────────────────────────────────────
+# VIDEO: detecta a palma uma vez e rastreia entre frames (IMAGE redetecta
+# do zero a cada frame e ignora min_tracking_confidence). Mesmos limiares
+# do capture_dynamic/preprocess_external — captura e treino consistentes.
 base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
 options = mp_vision.HandLandmarkerOptions(
     base_options=base_options,
-    running_mode=RunningMode.IMAGE,
+    running_mode=RunningMode.VIDEO,
     num_hands=1,
-    min_hand_detection_confidence=0.7,
-    min_hand_presence_confidence=0.5,
-    min_tracking_confidence=0.5,
+    min_hand_detection_confidence=0.6,
+    min_hand_presence_confidence=0.4,
+    min_tracking_confidence=0.4,
 )
 landmarker = mp_vision.HandLandmarker.create_from_options(options)
-
-
-# ─────────────────────────────────────────────────────────────
-# FUNÇÕES DE PROCESSAMENTO
-# ─────────────────────────────────────────────────────────────
-def extract_landmarks(landmarks) -> np.ndarray:
-    """Converte 21 landmarks em array (63,) com [x0,y0,z0, x1,y1,z1, ...]."""
-    coords = []
-    for lm in landmarks:
-        coords.extend([lm.x, lm.y, lm.z])
-    return np.array(coords, dtype=np.float32)
-
-
-def normalize_landmarks(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Normaliza os landmarks e retorna também as coordenadas brutas do pulso.
-
-    Retorna:
-        normalized: array (63,) com coords normalizadas (translação + escala)
-        wrist_raw:  array (3,) com [x, y, z] do pulso ANTES da normalização
-                    → usado para calcular o delta de movimento entre frames
-    """
-    points = raw.reshape(21, 3)
-
-    # Guarda posição bruta do pulso ANTES de normalizar
-    # (precisamos disso para calcular o quanto ele se moveu)
-    wrist_raw = points[WRIST_IDX].copy()
-
-    # Translação: centraliza no pulso
-    points = points - wrist_raw
-
-    # Escala: normaliza pela distância pulso → base do médio
-    scale = np.linalg.norm(points[SCALE_IDX])
-    if scale > 1e-6:
-        points = points / scale
-
-    return points.flatten(), wrist_raw
-
-
-def build_feature_vector(normalized: np.ndarray, wrist_raw: np.ndarray,
-                         prev_wrist: np.ndarray) -> np.ndarray:
-    """
-    Monta o vetor de features final de 66 valores para um frame.
-
-    Args:
-        normalized:  array (63,) com landmarks normalizados
-        wrist_raw:   array (3,) com posição bruta do pulso neste frame
-        prev_wrist:  array (3,) com posição bruta do pulso no frame anterior
-
-    Returns:
-        array (66,) = [63 coords normalizadas | Δx, Δy, Δz do pulso]
-    """
-    # Calcula o delta: quanto o pulso se moveu desde o frame anterior
-    # No frame 0, prev_wrist == wrist_raw, então delta = [0, 0, 0]
-    delta = wrist_raw - prev_wrist  # array (3,)
-
-    # np.concatenate junta dois arrays em sequência
-    return np.concatenate([normalized, delta])  # shape (66,)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -174,8 +138,34 @@ def draw_landmarks(frame, landmarks):
     for start, end in HAND_CONNECTIONS:
         cv2.line(frame, points[start], points[end], COR_CINZA, 2)
     for i, (px, py) in enumerate(points):
-        color = COR_VERMELHO if i in [4, 8, 12, 16, 20] else COR_VERDE
+        color = COR_VERMELHO if i in FINGERTIP_INDICES else COR_VERDE
         cv2.circle(frame, (px, py), 5, color, -1)
+
+
+def draw_burst_hud(frame, fotos_tiradas: int, proxima_em: float, flash: bool):
+    """HUD do modo burst: contagem da rajada + countdown até a próxima foto."""
+    h, w, _ = frame.shape
+
+    # Flash branco por ~0.15s logo após cada foto — feedback de "clique"
+    if flash:
+        cv2.rectangle(frame, (0, 0), (w - 1, h - 1), COR_BRANCO, 18)
+
+    txt = f"FOTO {fotos_tiradas}/{BURST_FOTOS}"
+    cv2.putText(frame, txt, (w // 2 - 90, 45),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, COR_VERDE, 3)
+
+    # Countdown grande até a próxima foto (segundos restantes)
+    if proxima_em > 0:
+        cv2.putText(frame, f"{proxima_em:.1f}s", (w // 2 - 40, h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.6, COR_AMARELO, 3)
+
+    # Barra de progresso da rajada
+    bar_w = int(w * 0.6)
+    bar_x = w // 2 - bar_w // 2
+    bar_y = h - 50
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + 20), COR_CINZA, -1)
+    fill = int(bar_w * fotos_tiradas / BURST_FOTOS)
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill, bar_y + 20), COR_VERDE, -1)
 
 
 def draw_hud(frame, gravando: bool, frames_gravados: int, amostras_salvas: int, ultima_amostra: str | None):
@@ -185,8 +175,8 @@ def draw_hud(frame, gravando: bool, frames_gravados: int, amostras_salvas: int, 
     """
     h, w, _ = frame.shape
 
-    # ── Barra de progresso da gravação ───────────────────────
-    if gravando:
+    # ── Barra de progresso da gravação (modo janela) ─────────
+    if gravando and MODO == "janela":
         progresso = frames_gravados / FRAMES
         bar_w     = int(w * 0.6)
         bar_x     = w // 2 - bar_w // 2
@@ -200,8 +190,11 @@ def draw_hud(frame, gravando: bool, frames_gravados: int, amostras_salvas: int, 
         # Texto de status
         txt = f"GRAVANDO... {frames_gravados}/{FRAMES} frames"
         cv2.putText(frame, txt, (bar_x, bar_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COR_VERDE, 2)
-    else:
-        instrucao = "Posicione a mao e pressione ESPACO para gravar"
+    elif not gravando:
+        if MODO == "burst":
+            instrucao = f"ESPACO dispara {BURST_FOTOS} fotos ({BURST_INTERVALO:.0f}s entre elas) — varie a pose entre rajadas"
+        else:
+            instrucao = "Posicione a mao e pressione ESPACO para gravar"
         cv2.putText(frame, instrucao, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COR_AMARELO, 1)
 
     # ── Info no canto superior esquerdo ──────────────────────
@@ -212,7 +205,8 @@ def draw_hud(frame, gravando: bool, frames_gravados: int, amostras_salvas: int, 
 
     # ── Dica de undo ─────────────────────────────────────────
     if ultima_amostra and not gravando:
-        cv2.putText(frame, "[u] Desfazer ultima amostra", (10, 90),
+        rotulo = "rajada" if (MODO == "burst" and len(ultima_amostra) > 1) else "amostra"
+        cv2.putText(frame, f"[u] Desfazer ultima {rotulo}", (10, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 255), 1)
 
     # ── Aviso de conclusão ────────────────────────────────────
@@ -225,12 +219,32 @@ def draw_hud(frame, gravando: bool, frames_gravados: int, amostras_salvas: int, 
 # ─────────────────────────────────────────────────────────────
 # ESTADO DA GRAVAÇÃO
 # ─────────────────────────────────────────────────────────────
-gravando        = False          # True enquanto estamos acumulando frames
+gravando        = False          # True enquanto estamos acumulando frames (modo janela)
 buffer          = []             # lista de arrays (66,) — acumula os 30 frames
 prev_wrist      = None           # posição do pulso no frame anterior
 amostras_salvas = existing_count # conta real de arquivos no disco
 next_file_idx   = next_idx       # índice usado para nomear o próximo arquivo
-ultima_amostra  = None           # caminho do último .npy salvo (para undo)
+ultima_amostra  = None           # lista de caminhos salvos no último disparo (para undo)
+
+# Estado do modo burst
+burst_restantes  = 0             # fotos que ainda faltam na rajada atual
+proxima_foto_em  = 0.0           # time.monotonic() da próxima foto
+flash_ate        = 0.0           # feedback visual de "clique" até este instante
+
+
+def salvar_amostra_estatica(feature_vector) -> str:
+    """
+    Salva UMA foto como amostra estática (30, 66): frame replicado 30x.
+    O delta do pulso já vem zerado (passamos wrist == prev_wrist na chamada) —
+    mesmo formato que o preprocess do Brazilian Alphabet gera para imagens.
+    """
+    global next_file_idx, amostras_salvas
+    tensor = np.tile(feature_vector, (FRAMES, 1)).astype(np.float32)  # (30, 66)
+    filepath = os.path.join(output_dir, f"{next_file_idx}.npy")
+    np.save(filepath, tensor)
+    next_file_idx   += 1
+    amostras_salvas += 1
+    return filepath
 
 
 # ─────────────────────────────────────────────────────────────
@@ -239,6 +253,9 @@ ultima_amostra  = None           # caminho do último .npy salvo (para undo)
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     raise RuntimeError("Não foi possível abrir a webcam.")
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+t_inicio = time.monotonic()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -255,7 +272,8 @@ while True:
         image_format=mp.ImageFormat.SRGB,
         data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
     )
-    result = landmarker.detect(mp_image)
+    timestamp_ms = int((time.monotonic() - t_inicio) * 1000)
+    result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
     mao_detectada = bool(result.hand_landmarks)
 
@@ -273,7 +291,22 @@ while True:
         feature_vector = build_feature_vector(normalized, wrist_raw, prev_wrist)
         prev_wrist     = wrist_raw.copy()  # atualiza para o próximo frame
 
-        # ── Acumula frames se estiver gravando ───────────────
+        # ── Modo burst: tira a foto quando chega a hora ──────
+        if burst_restantes > 0 and time.monotonic() >= proxima_foto_em:
+            # Foto = frame atual com delta ZERO (sinal estático) — recalcula
+            # o vetor com prev == atual em vez de reusar o delta do stream.
+            vec_estatico = build_feature_vector(normalized, wrist_raw, wrist_raw)
+            filepath = salvar_amostra_estatica(vec_estatico)
+            ultima_amostra.append(filepath)
+            burst_restantes -= 1
+            flash_ate = time.monotonic() + 0.15
+            proxima_foto_em = time.monotonic() + BURST_INTERVALO
+            n = len(ultima_amostra)
+            print(f"  Foto {n}/{BURST_FOTOS} salva: {filepath}")
+            if burst_restantes == 0:
+                print(f"  Rajada completa ({n} amostras). Mude a pose e pressione ESPACO. [u] desfaz a rajada.")
+
+        # ── Acumula frames se estiver gravando (modo janela) ─
         if gravando:
             buffer.append(feature_vector)  # adiciona array (66,) ao buffer
 
@@ -288,7 +321,7 @@ while True:
 
                 next_file_idx   += 1
                 amostras_salvas += 1
-                ultima_amostra   = filepath  # guarda para possível undo
+                ultima_amostra   = [filepath]  # guarda para possível undo
                 print(f"  Salvo: {filepath} | shape={tensor.shape} | dtype={tensor.dtype}")
                 print(f"  (Pressione 'u' para desfazer esta amostra)")
 
@@ -305,9 +338,24 @@ while True:
             print("  Mao perdida durante gravacao — amostra descartada.")
             buffer   = []
             gravando = False
+        if burst_restantes > 0:
+            # Rajada em pausa: empurra o timer para frente até a mão voltar,
+            # em vez de fotografar um frame sem mão.
+            proxima_foto_em = time.monotonic() + BURST_INTERVALO
 
     # ── HUD ──────────────────────────────────────────────────
     draw_hud(frame, gravando, len(buffer), amostras_salvas, ultima_amostra)
+    if burst_restantes > 0:
+        fotos_tiradas = BURST_FOTOS - burst_restantes
+        draw_burst_hud(
+            frame,
+            fotos_tiradas,
+            max(0.0, proxima_foto_em - time.monotonic()),
+            flash=time.monotonic() < flash_ate,
+        )
+    elif time.monotonic() < flash_ate:
+        # Flash da última foto da rajada ainda visível
+        draw_burst_hud(frame, BURST_FOTOS, 0.0, flash=True)
 
     # Indica se a mão NÃO está na tela (aviso vermelho)
     if not mao_detectada and not gravando:
@@ -326,26 +374,33 @@ while True:
     # ESPAÇO (ASCII 32) → inicia gravação se não estiver gravando
     # e se a mão estiver visível e ainda não atingiu a meta
     elif key == ord("u"):
-        # ── Undo: apaga a última amostra salva ───────────────
-        if gravando:
+        # ── Undo: apaga a última rajada/amostra salva ─────────
+        if gravando or burst_restantes > 0:
             print("  Nao e possivel desfazer durante a gravacao.")
-        elif ultima_amostra is None:
+        elif not ultima_amostra:
             print("  Nenhuma amostra para desfazer.")
-        elif not os.path.exists(ultima_amostra):
-            print("  Arquivo ja foi removido.")
         else:
-            os.remove(ultima_amostra)
-            amostras_salvas -= 1
-            print(f"  DESFEITO: {ultima_amostra} removido. Contador voltou para {amostras_salvas}.")
+            removidos = 0
+            for path in ultima_amostra:
+                if os.path.exists(path):
+                    os.remove(path)
+                    removidos += 1
+            amostras_salvas -= removidos
+            print(f"  DESFEITO: {removidos} arquivo(s) removido(s). Contador voltou para {amostras_salvas}.")
             ultima_amostra = None  # só permite desfazer uma vez
 
     elif key == 32:
         if not mao_detectada:
             print("  Mao nao detectada. Posicione a mao antes de gravar.")
-        elif gravando:
+        elif gravando or burst_restantes > 0:
             print("  Ja esta gravando...")
         elif amostras_salvas >= MAX_AMOSTRAS:
             print("  Meta atingida! Pressione 'q' para sair.")
+        elif MODO == "burst":
+            print(f"  Rajada iniciada: {BURST_FOTOS} fotos, {BURST_INTERVALO:.0f}s entre elas. Segure a pose!")
+            burst_restantes = BURST_FOTOS
+            proxima_foto_em = time.monotonic()  # primeira foto imediata
+            ultima_amostra  = []                # acumula os paths da rajada
         else:
             print(f"  Iniciando gravacao da amostra {amostras_salvas}...")
             gravando       = True

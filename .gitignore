@@ -8,10 +8,26 @@ data/*
 *.npy
 *.csv
 
-# Modelos pré-treinados (arquivos pesados)
-models/
+# Modelos pré-treinados (arquivos pesados, inclui backups .bak*)
+models/*.pth*
+models/*.task
+models/*train_log.json*
+# mantém label_map.json e model_config.json (e as variantes por modelo, ADR-010)
+# — arquivos pequenos e úteis para reproduzir inferência
 
 # Arquivos de Sistema
 .DS_Store
+Thumbs.db
 __pycache__/
+*.py[cod]
 .ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDEs
+.vscode/
+.idea/
+
+# Artefatos gerados pelo notebook
+artifacts/
